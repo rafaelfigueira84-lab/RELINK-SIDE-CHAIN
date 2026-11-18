@@ -30,6 +30,8 @@ public:
     std::atomic<float> learnedDurationMs { 180.0f };
     std::atomic<float> kickLevelDb { -90.0f };
     std::atomic<bool> sidechainPresent { false };
+    std::atomic<float> autoDepthDb { 6.0f };
+    std::atomic<float> crossoverHz { 130.0f };
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout makeParameters();
     double fs = 44100.0;
@@ -39,5 +41,9 @@ private:
     int observedPulseSamples = 0;
     bool insidePulse = false;
     float durationEstimateMs = 180.0f;
+    float adaptiveDepthDb = 6.0f;
+    float bassLowEnergy = 0.0f, kickLowEnergy = 0.0f, kickHighEnergy = 0.0f;
+    float kickLowState = 0.0f, kickMidState = 0.0f;
+    float bassLowState[2] { 0.0f, 0.0f };
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RelinkSmartSidechainAudioProcessor)
 };
