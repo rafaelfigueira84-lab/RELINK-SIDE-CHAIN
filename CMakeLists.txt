@@ -19,6 +19,7 @@ juce_add_plugin(RelinkSmartSidechain
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
 target_sources(RelinkSmartSidechain PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+juce_generate_juce_header(RelinkSmartSidechain)
 target_compile_features(RelinkSmartSidechain PRIVATE cxx_std_17)
 target_compile_definitions(RelinkSmartSidechain PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 target_link_libraries(RelinkSmartSidechain PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
