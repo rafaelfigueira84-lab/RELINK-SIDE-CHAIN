@@ -143,9 +143,13 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
                 {
                     const float k = float(std::sqrt(analysisKickSum / analysisSamplesWithKick));
                     const float b = float(std::sqrt(analysisBassSum / analysisSamplesWithKick));
-                    // Target bass low-band energy <= ~75% of kick during overlap.
-                    // Independent of the user-set maximum reduction cap.
-                    frozenDepthDb = juce::jlimit(0.0f, 18.0f, 20.0f * std::log10(juce::jmax(1.0f, b / juce::jmax(0.00001f, 0.75f * k))));
+                    // An audible overlapping bass needs space even when its RMS is
+                    // lower than the kick's. The recommendation is independent of
+                    // Max Reduction and is intentionally a conservative heuristic.
+                    const float presence = juce::jlimit(0.0f, 1.0f, b / 0.012f);
+                    const float levelRatio = juce::jlimit(0.0f, 1.5f, b / juce::jmax(0.001f, k));
+                    frozenDepthDb = b < 0.0015f ? 0.0f
+                        : juce::jlimit(0.0f, 16.0f, (5.0f + 5.0f * presence + 2.0f * levelRatio) * presence);
                     frozenDurationMs = durationEstimateMs;
                     recommendedDepthDb.store(frozenDepthDb);
                     analysisReady.store(true);
@@ -163,8 +167,10 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         // Independent live recommendation (no longer pegged to Max Reduction).
         const float bassRms = std::sqrt(juce::jmax(0.0f, bassLowEnergy));
         const float kickRms = std::sqrt(juce::jmax(0.0f, kickLowEnergy));
-        const float ratio = bassRms / juce::jmax(0.00001f, 0.75f * kickRms);
-        const float suggestedDepth = juce::jlimit(0.0f, 18.0f, 20.0f * std::log10(juce::jmax(1.0f, ratio)));
+        const float presence = juce::jlimit(0.0f, 1.0f, bassRms / 0.012f);
+        const float ratio = juce::jlimit(0.0f, 1.5f, bassRms / juce::jmax(0.001f, kickRms));
+        const float suggestedDepth = bassRms < 0.0015f || kickRms < 0.0015f ? 0.0f
+            : juce::jlimit(0.0f, 16.0f, (5.0f + 5.0f * presence + 2.0f * ratio) * presence);
         adaptiveDepthDb += 0.0005f * (suggestedDepth - adaptiveDepthDb);
         const float recommended = analysisReady.load() ? frozenDepthDb : adaptiveDepthDb;
         const float depth = autoDepth ? juce::jmin(maxDepth, recommended) : maxDepth;
