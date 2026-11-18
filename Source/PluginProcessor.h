@@ -44,6 +44,10 @@ private:
     int observedPulseSamples = 0;
     bool insidePulse = false;
     float durationEstimateMs = 180.0f;
+    float lowEndEnvelope = 0.0f, lowEndPeak = 0.0f;
+    float estimatedBeatMs = 485.0f;
+    bool measuringLowEnd = false;
+    int lowEndSamples = 0;
     float adaptiveDepthDb = 6.0f;
     float bassLowEnergy = 0.0f, kickLowEnergy = 0.0f, kickHighEnergy = 0.0f;
     float kickLowState = 0.0f, kickMidState = 0.0f;

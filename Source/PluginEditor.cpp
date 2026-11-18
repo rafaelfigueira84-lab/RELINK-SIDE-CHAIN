@@ -80,7 +80,7 @@ void RelinkSmartSidechainAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("RELINK", 22, 16, 150, 35, juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xffd8e3eb));
     g.setFont(juce::FontOptions(16.0f));
-    g.drawText("SMART SIDECHAIN   v0.4", 145, 18, 300, 31, juce::Justification::centredLeft);
+    g.drawText("SMART SIDECHAIN   v0.5", 145, 18, 300, 31, juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xff253540));
     g.drawLine(228, 75, 228, 435, 1.5f);
     g.setColour(processor.sidechainPresent.load() ? juce::Colour(0xff34dec9) : juce::Colour(0xfff2aa5c));
