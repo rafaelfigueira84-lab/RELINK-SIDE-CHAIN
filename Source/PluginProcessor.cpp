@@ -49,6 +49,12 @@ void RelinkSmartSidechainAudioProcessor::prepareToPlay(double sr, int)
     bassLowEnergy = kickLowEnergy = kickHighEnergy = 0.0f;
     kickLowState = kickMidState = 0.0f;
     bassLowState[0] = bassLowState[1] = 0.0f;
+    bassAnalysisLowState = 0.0f;
+    analysisSamples = analysisSamplesWithKick = 0;
+    analysisKickSum = analysisBassSum = 0.0;
+    analysisRunning.store(false);
+    analysisReady.store(false);
+    analysisProgress.store(0);
 }
 
 void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -74,6 +80,15 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
     const float rmsWeight = 1.0f - std::exp(-1.0f / (float(fs) * 0.075f));
     const float low80Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 80.0f / float(fs));
     const float low220Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 220.0f / float(fs));
+    const float bassAnalysisWeight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 130.0f / float(fs));
+    if (requestAnalysis.exchange(false))
+    {
+        analysisSamples = analysisSamplesWithKick = 0;
+        analysisKickSum = analysisBassSum = 0.0;
+        analysisReady.store(false);
+        analysisRunning.store(true);
+        analysisProgress.store(0);
+    }
     float peakKick = 0;
     for (int i = 0; i < n; ++i)
     {
@@ -90,7 +105,8 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         const float upperLow = kickMidState - kickLowState;
         kickHighEnergy += rmsWeight * (upperLow * upperLow - kickHighEnergy);
         const float bassInput = 0.5f * (mainInput.getSample(0, i) + mainInput.getSample(1, i));
-        bassLowEnergy += rmsWeight * (bassInput * bassInput - bassLowEnergy);
+        bassAnalysisLowState += bassAnalysisWeight * (bassInput - bassAnalysisLowState);
+        bassLowEnergy += rmsWeight * (bassAnalysisLowState * bassAnalysisLowState - bassLowEnergy);
         detectorEnvelope = kick + (detectorEnvelope - kick) * (kick > detectorEnvelope ? detAttack : detRelease);
         const bool above = detectorEnvelope > threshold;
         const int refractory = int(fs * 0.090);
@@ -111,19 +127,47 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
             }
         }
         ++samplesSinceTrigger;
-        const float durationMs = autoMode ? durationEstimateMs : parameters.getRawParameterValue("release")->load();
+        if (analysisRunning.load())
+        {
+            // Accumulate overlapping low-band power over four seconds of playback.
+            if (hasSC && samplesSinceTrigger < int(0.22 * fs))
+            {
+                analysisKickSum += double(kickLowState) * double(kickLowState);
+                analysisBassSum += double(bassAnalysisLowState) * double(bassAnalysisLowState);
+                ++analysisSamplesWithKick;
+            }
+            ++analysisSamples;
+            if (analysisSamples >= int(fs * 4.0))
+            {
+                if (analysisSamplesWithKick > int(fs * 0.08) && analysisKickSum > 1.0e-8)
+                {
+                    const float k = float(std::sqrt(analysisKickSum / analysisSamplesWithKick));
+                    const float b = float(std::sqrt(analysisBassSum / analysisSamplesWithKick));
+                    // Target bass low-band energy <= ~75% of kick during overlap.
+                    // Independent of the user-set maximum reduction cap.
+                    frozenDepthDb = juce::jlimit(0.0f, 18.0f, 20.0f * std::log10(juce::jmax(1.0f, b / juce::jmax(0.00001f, 0.75f * k))));
+                    frozenDurationMs = durationEstimateMs;
+                    recommendedDepthDb.store(frozenDepthDb);
+                    analysisReady.store(true);
+                }
+                analysisRunning.store(false);
+            }
+        }
+        const float durationMs = autoMode ? (analysisReady.load() ? frozenDurationMs : durationEstimateMs)
+                                          : parameters.getRawParameterValue("release")->load();
         const float t = (samplesSinceTrigger - int(offsetMs * float(fs) / 1000.0f)) / juce::jmax(1.0f, durationMs * float(fs) / 1000.0f);
         // Smoothstep recovery: the duck begins at a detected kick transient.
         const float u = juce::jlimit(0.0f, 1.0f, t);
         const float recovery = u * u * (3.0f - 2.0f * u);
         const float reduction = (samplesSinceTrigger < int(offsetMs * fs / 1000.0)) ? 0.0f : (1.0f - recovery);
-        // Heuristic strength from overlapping bass/kick energy, bounded by Max Reduction.
-        // This is a lightweight estimate, not a psychoacoustic masking model.
-        const float overlap = std::sqrt(juce::jmax(0.0f, bassLowEnergy)) /
-                              (std::sqrt(juce::jmax(0.0f, kickLowEnergy)) + 0.0001f);
-        const float suggestedDepth = juce::jlimit(0.0f, maxDepth, 4.0f + 5.0f * overlap);
+        // Independent live recommendation (no longer pegged to Max Reduction).
+        const float bassRms = std::sqrt(juce::jmax(0.0f, bassLowEnergy));
+        const float kickRms = std::sqrt(juce::jmax(0.0f, kickLowEnergy));
+        const float ratio = bassRms / juce::jmax(0.00001f, 0.75f * kickRms);
+        const float suggestedDepth = juce::jlimit(0.0f, 18.0f, 20.0f * std::log10(juce::jmax(1.0f, ratio)));
         adaptiveDepthDb += 0.0005f * (suggestedDepth - adaptiveDepthDb);
-        const float depth = autoDepth ? adaptiveDepthDb : maxDepth;
+        const float recommended = analysisReady.load() ? frozenDepthDb : adaptiveDepthDb;
+        const float depth = autoDepth ? juce::jmin(maxDepth, recommended) : maxDepth;
         const float targetGain = juce::Decibels::decibelsToGain(-depth * amount * reduction);
         const float slew = targetGain < gainEnvelope ? 0.34f : 0.08f;
         gainEnvelope += slew * (targetGain - gainEnvelope);
@@ -141,10 +185,13 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         }
     }
     visibleReductionDb.store(-juce::Decibels::gainToDecibels(juce::jmax(0.00001f, gainEnvelope)));
-    learnedDurationMs.store(durationEstimateMs);
+    learnedDurationMs.store(analysisReady.load() ? frozenDurationMs : durationEstimateMs);
     kickLevelDb.store(juce::Decibels::gainToDecibels(juce::jmax(1.0e-5f, peakKick)));
     sidechainPresent.store(hasSC && peakKick > 1.0e-5f);
     autoDepthDb.store(adaptiveDepthDb);
+    if (analysisRunning.load()) analysisProgress.store(juce::jlimit(0.0f, 1.0f, float(analysisSamples / (fs * 4.0))));
+    appliedDepthDb.store(parameters.getRawParameterValue("autodepth")->load() > 0.5f
+        ? juce::jmin(maxDepth, analysisReady.load() ? frozenDepthDb : adaptiveDepthDb) : maxDepth);
     crossoverHz.store(parameters.getRawParameterValue("autofrequency")->load() > 0.5f
         ? (kickLowEnergy > kickHighEnergy * 1.8f ? 105.0f : 185.0f) : fixedFrequency);
 }

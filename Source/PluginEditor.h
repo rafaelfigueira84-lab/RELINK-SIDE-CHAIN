@@ -13,6 +13,7 @@ private:
     juce::Slider amount, depth, release, offset, threshold, frequency;
     juce::ToggleButton autoTiming { "AUTO TIMING" };
     juce::ToggleButton autoDepth { "AUTO DEPTH" }, autoFrequency { "AUTO FREQ" };
+    juce::TextButton analyzeButton { "ANALYZE KICK + BASS (4s)" };
     juce::ComboBox mode;
     juce::Label amountLabel, depthLabel, releaseLabel, offsetLabel, thresholdLabel, frequencyLabel, modeLabel;
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;

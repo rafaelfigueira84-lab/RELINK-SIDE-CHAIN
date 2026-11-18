@@ -15,6 +15,9 @@ RelinkSmartSidechainAudioProcessorEditor::RelinkSmartSidechainAudioProcessorEdit
     addAndMakeVisible(autoDepth);
     addAndMakeVisible(autoFrequency);
     addAndMakeVisible(mode);
+    addAndMakeVisible(analyzeButton);
+    analyzeButton.onClick = [this] { processor.requestAnalysis.store(true); };
+    analyzeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff198a80));
     addAndMakeVisible(modeLabel);
     modeLabel.setText("DUCKING MODE", juce::dontSendNotification);
     modeLabel.setColour(juce::Label::textColourId, juce::Colour(0xffbdc9d5));
@@ -31,7 +34,7 @@ RelinkSmartSidechainAudioProcessorEditor::RelinkSmartSidechainAudioProcessorEdit
     autoDepthA = std::make_unique<ButtonAttachment>(p.parameters, "autodepth", autoDepth);
     autoFrequencyA = std::make_unique<ButtonAttachment>(p.parameters, "autofrequency", autoFrequency);
     modeA = std::make_unique<ChoiceAttachment>(p.parameters, "mode", mode);
-    setSize(670, 495);
+    setSize(690, 550);
     startTimerHz(20);
 }
 
@@ -57,6 +60,7 @@ void RelinkSmartSidechainAudioProcessorEditor::resized()
     autoFrequency.setBounds(35, 347, 155, 28);
     modeLabel.setBounds(33, 379, 170, 22);
     mode.setBounds(33, 404, 165, 27);
+    analyzeButton.setBounds(35, 450, 250, 36);
     auto place = [&](juce::Label& l, juce::Slider& s, int y) {
         l.setBounds(248, y, 350, 19);
         s.setBounds(245, y + 18, 370, 27);
@@ -76,16 +80,19 @@ void RelinkSmartSidechainAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("RELINK", 22, 16, 150, 35, juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xffd8e3eb));
     g.setFont(juce::FontOptions(16.0f));
-    g.drawText("SMART SIDECHAIN   v0.2", 145, 18, 300, 31, juce::Justification::centredLeft);
+    g.drawText("SMART SIDECHAIN   v0.3", 145, 18, 300, 31, juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xff253540));
     g.drawLine(228, 75, 228, 435, 1.5f);
     g.setColour(processor.sidechainPresent.load() ? juce::Colour(0xff34dec9) : juce::Colour(0xfff2aa5c));
     g.setFont(juce::FontOptions(12.0f));
-    g.drawText(processor.sidechainPresent.load() ? "KICK DETECTED" : "WAITING FOR SIDECHAIN KICK", 22, 455, 270, 22, juce::Justification::centredLeft);
+    g.drawText(processor.sidechainPresent.load() ? "KICK DETECTED" : "WAITING FOR SIDECHAIN KICK", 310, 455, 340, 22, juce::Justification::centredLeft);
     g.setColour(juce::Colour(0xffafbac4));
-    g.drawText("Learned: " + juce::String(processor.learnedDurationMs.load(), 0) + " ms", 296, 455, 140, 22, juce::Justification::centredLeft);
-    g.drawText("Auto depth: " + juce::String(processor.autoDepthDb.load(), 1) + " dB", 422, 455, 130, 22, juce::Justification::centredLeft);
-    g.drawText("GR: " + juce::String(processor.visibleReductionDb.load(), 1) + " dB", 557, 455, 100, 22, juce::Justification::centredLeft);
+    const auto status = processor.analysisRunning.load() ? "ANALYZING: " + juce::String(int(processor.analysisProgress.load() * 100)) + "%"
+                     : processor.analysisReady.load() ? "ANALYSIS READY" : "PRESS ANALYZE TO CALIBRATE";
+    g.drawText(status, 25, 510, 220, 21, juce::Justification::centredLeft);
+    g.drawText("Time: " + juce::String(processor.learnedDurationMs.load(), 0) + " ms", 244, 510, 112, 21, juce::Justification::centredLeft);
+    g.drawText("Suggested: " + juce::String(processor.analysisReady.load() ? processor.recommendedDepthDb.load() : processor.autoDepthDb.load(), 1) + " dB", 360, 510, 145, 21, juce::Justification::centredLeft);
+    g.drawText("Applied: " + juce::String(processor.appliedDepthDb.load(), 1) + " dB", 509, 510, 125, 21, juce::Justification::centredLeft);
 }
 
 juce::AudioProcessorEditor* RelinkSmartSidechainAudioProcessor::createEditor()
