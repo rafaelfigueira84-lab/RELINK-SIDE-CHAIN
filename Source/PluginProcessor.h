@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <atomic>
+#include <array>
 
 class RelinkSmartSidechainAudioProcessor final : public juce::AudioProcessor
 {
@@ -35,6 +36,10 @@ public:
     std::atomic<bool> requestAnalysis { false }, analysisRunning { false }, analysisReady { false };
     std::atomic<float> analysisProgress { 0.0f }, recommendedDepthDb { 0.0f };
     std::atomic<float> appliedDepthDb { 0.0f };
+    static constexpr int waveformPoints = 128;
+    std::array<std::atomic<float>, waveformPoints> kickWave {};
+    std::array<std::atomic<float>, waveformPoints> bassWave {};
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout makeParameters();
     double fs = 44100.0;
@@ -44,6 +49,10 @@ private:
     int observedPulseSamples = 0;
     bool insidePulse = false;
     float durationEstimateMs = 180.0f;
+    float lowEndEnvelope = 0.0f, lowEndPeak = 0.0f;
+    float estimatedBeatMs = 485.0f;
+    bool measuringLowEnd = false;
+    int lowEndSamples = 0;
     float adaptiveDepthDb = 6.0f;
     float bassLowEnergy = 0.0f, kickLowEnergy = 0.0f, kickHighEnergy = 0.0f;
     float kickLowState = 0.0f, kickMidState = 0.0f;
@@ -52,5 +61,8 @@ private:
     int analysisSamples = 0, analysisSamplesWithKick = 0;
     double analysisKickSum = 0.0, analysisBassSum = 0.0;
     float frozenDurationMs = 180.0f, frozenDepthDb = 0.0f;
+    bool waveformCapturePending = false, waveformCaptureActive = false;
+    int waveformSampleCount = 0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RelinkSmartSidechainAudioProcessor)
 };

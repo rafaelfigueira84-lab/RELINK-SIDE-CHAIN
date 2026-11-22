@@ -25,6 +25,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RelinkSmartSidechainAudioPro
     p.push_back(std::make_unique<C>(juce::ParameterID{"mode", 1}, "Ducking Mode", juce::StringArray { "Volume", "Spectral" }, 0));
     p.push_back(std::make_unique<P>(juce::ParameterID{"frequency", 1}, "Spectral Cutoff (Hz)", juce::NormalisableRange<float>(50, 300, 1), 130));
     p.push_back(std::make_unique<B>(juce::ParameterID{"autofrequency", 1}, "Auto Frequency", true));
+    p.push_back(std::make_unique<P>(juce::ParameterID{"attack", 1}, "Curve Attack (ms)", juce::NormalisableRange<float>(0.5f, 40.0f, 0.5f), 2.0f));
+    p.push_back(std::make_unique<P>(juce::ParameterID{"hold", 1}, "Curve Hold (%)", juce::NormalisableRange<float>(0.0f, 75.0f, 1.0f), 10.0f));
+    p.push_back(std::make_unique<P>(juce::ParameterID{"shape", 1}, "Curve Shape", juce::NormalisableRange<float>(0.3f, 3.0f, 0.05f), 1.0f));
     return { p.begin(), p.end() };
 }
 
@@ -45,6 +48,10 @@ void RelinkSmartSidechainAudioProcessor::prepareToPlay(double sr, int)
     observedPulseSamples = 0;
     insidePulse = false;
     durationEstimateMs = 180;
+    lowEndEnvelope = lowEndPeak = 0.0f;
+    estimatedBeatMs = 485.0f;
+    measuringLowEnd = false;
+    lowEndSamples = 0;
     adaptiveDepthDb = 6.0f;
     bassLowEnergy = kickLowEnergy = kickHighEnergy = 0.0f;
     kickLowState = kickMidState = 0.0f;
@@ -55,6 +62,10 @@ void RelinkSmartSidechainAudioProcessor::prepareToPlay(double sr, int)
     analysisRunning.store(false);
     analysisReady.store(false);
     analysisProgress.store(0);
+    waveformCapturePending = waveformCaptureActive = false;
+    waveformSampleCount = 0;
+    for (auto& v : kickWave) v.store(0.0f);
+    for (auto& v : bassWave) v.store(0.0f);
 }
 
 void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -74,6 +85,9 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
     const auto autoDepth = parameters.getRawParameterValue("autodepth")->load() > 0.5f;
     const auto autoFrequency = parameters.getRawParameterValue("autofrequency")->load() > 0.5f;
     const float fixedFrequency = parameters.getRawParameterValue("frequency")->load();
+    const float attackMs = parameters.getRawParameterValue("attack")->load();
+    const float holdRatio = parameters.getRawParameterValue("hold")->load() * 0.01f;
+    const float curveShape = parameters.getRawParameterValue("shape")->load();
     const float threshold = juce::Decibels::decibelsToGain(thresholdDb);
     const float detAttack = std::exp(-1.0f / (float(fs) * 0.0015f));
     const float detRelease = std::exp(-1.0f / (float(fs) * 0.022f));
@@ -81,6 +95,8 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
     const float low80Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 80.0f / float(fs));
     const float low220Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 220.0f / float(fs));
     const float bassAnalysisWeight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 130.0f / float(fs));
+    const float lowAttack = std::exp(-1.0f / (float(fs) * 0.004f));
+    const float lowRelease = std::exp(-1.0f / (float(fs) * 0.016f));
     if (requestAnalysis.exchange(false))
     {
         analysisSamples = analysisSamplesWithKick = 0;
@@ -88,6 +104,11 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         analysisReady.store(false);
         analysisRunning.store(true);
         analysisProgress.store(0);
+        waveformCapturePending = true;
+        waveformCaptureActive = false;
+        waveformSampleCount = 0;
+        for (auto& v : kickWave) v.store(0.0f, std::memory_order_relaxed);
+        for (auto& v : bassWave) v.store(0.0f, std::memory_order_relaxed);
     }
     float peakKick = 0;
     for (int i = 0; i < n; ++i)
@@ -100,11 +121,24 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         // Slow amplitude/spectrum statistics; the bass is measured before gain reduction.
         const float kickSignal = hasSC && scBuffer.getNumChannels() > 0 ? scBuffer.getSample(0, i) : 0.0f;
         kickLowState += low80Weight * (kickSignal - kickLowState);
+        const float lowMagnitude = std::abs(kickLowState);
+        lowEndEnvelope = lowMagnitude + (lowEndEnvelope - lowMagnitude) *
+            (lowMagnitude > lowEndEnvelope ? lowAttack : lowRelease);
         kickMidState += low220Weight * (kickSignal - kickMidState);
         kickLowEnergy += rmsWeight * (kickLowState * kickLowState - kickLowEnergy);
         const float upperLow = kickMidState - kickLowState;
         kickHighEnergy += rmsWeight * (upperLow * upperLow - kickHighEnergy);
         const float bassInput = 0.5f * (mainInput.getSample(0, i) + mainInput.getSample(1, i));
+        if (waveformCaptureActive)
+        {
+            const int windowSamples = juce::jmax(1, int(fs * 0.60));
+            const int bin = juce::jmin(waveformPoints - 1, waveformSampleCount * waveformPoints / windowSamples);
+            // Peak-hold within each display bin; atomics keep audio/UI threads independent.
+            const float kb = std::abs(kickSignal), bb = std::abs(bassInput);
+            if (kb > kickWave[bin].load(std::memory_order_relaxed)) kickWave[bin].store(kb, std::memory_order_relaxed);
+            if (bb > bassWave[bin].load(std::memory_order_relaxed)) bassWave[bin].store(bb, std::memory_order_relaxed);
+            if (++waveformSampleCount >= windowSamples) waveformCaptureActive = false;
+        }
         bassAnalysisLowState += bassAnalysisWeight * (bassInput - bassAnalysisLowState);
         bassLowEnergy += rmsWeight * (bassAnalysisLowState * bassAnalysisLowState - bassLowEnergy);
         detectorEnvelope = kick + (detectorEnvelope - kick) * (kick > detectorEnvelope ? detAttack : detRelease);
@@ -112,17 +146,43 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         const int refractory = int(fs * 0.090);
         if (above && !insidePulse && samplesSinceTrigger > refractory)
         {
+            const float beat = samplesSinceTrigger * 1000.0f / float(fs);
+            if (beat >= 220.0f && beat <= 1100.0f)
+                estimatedBeatMs = 0.75f * estimatedBeatMs + 0.25f * beat;
             samplesSinceTrigger = 0;
             observedPulseSamples = 0;
             insidePulse = true;
+            lowEndPeak = juce::jmax(lowEndEnvelope, 0.00001f);
+            lowEndSamples = 0;
+            measuringLowEnd = true;
+            if (analysisRunning.load() && waveformCapturePending)
+            {
+                waveformCapturePending = false;
+                waveformCaptureActive = true;
+                waveformSampleCount = 0;
+            }
+        }
+        if (measuringLowEnd)
+        {
+            ++lowEndSamples;
+            lowEndPeak = juce::jmax(lowEndPeak, lowEndEnvelope);
+            const float elapsedMs = lowEndSamples * 1000.0f / float(fs);
+            // The relevant bass/kick overlap usually ends before the absolute
+            // silence threshold used by the original envelope detector.
+            if ((elapsedMs > 45.0f && lowEndEnvelope < lowEndPeak * 0.30f)
+                || elapsedMs > 450.0f)
+            {
+                const float rhythmicCeiling = juce::jlimit(100.0f, 320.0f, 0.44f * estimatedBeatMs);
+                const float observed = juce::jlimit(65.0f, rhythmicCeiling, elapsedMs * 0.85f + 12.0f);
+                durationEstimateMs = 0.70f * durationEstimateMs + 0.30f * observed;
+                measuringLowEnd = false;
+            }
         }
         if (insidePulse)
         {
             ++observedPulseSamples;
             if (!above || observedPulseSamples > int(fs * 0.45))
             {
-                const float observed = juce::jlimit(55.0f, 450.0f, observedPulseSamples * 1000.0f / float(fs));
-                durationEstimateMs = 0.80f * durationEstimateMs + 0.20f * (observed + 28.0f);
                 insidePulse = false;
             }
         }
@@ -160,10 +220,27 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         const float durationMs = autoMode ? (analysisReady.load() ? frozenDurationMs : durationEstimateMs)
                                           : parameters.getRawParameterValue("release")->load();
         const float t = (samplesSinceTrigger - int(offsetMs * float(fs) / 1000.0f)) / juce::jmax(1.0f, durationMs * float(fs) / 1000.0f);
-        // Smoothstep recovery: the duck begins at a detected kick transient.
-        const float u = juce::jlimit(0.0f, 1.0f, t);
-        const float recovery = u * u * (3.0f - 2.0f * u);
-        const float reduction = (samplesSinceTrigger < int(offsetMs * fs / 1000.0)) ? 0.0f : (1.0f - recovery);
+        // Editable duck envelope: onset -> short attack -> hold -> curved recovery.
+        // No lookahead: the earliest onset is the detected transient, not before it.
+        const float elapsedMs = (samplesSinceTrigger * 1000.0f / float(fs)) - offsetMs;
+        const float attackFraction = juce::jlimit(0.001f, 0.7f, attackMs / juce::jmax(1.0f, durationMs));
+        const float holdEnd = juce::jmin(0.9f, attackFraction + holdRatio);
+        float reduction = 0.0f;
+        if (elapsedMs >= 0.0f && t < 1.0f)
+        {
+            if (t < attackFraction)
+            {
+                const float a = juce::jlimit(0.0f, 1.0f, t / attackFraction);
+                reduction = a * a * (3.0f - 2.0f * a);
+            }
+            else if (t <= holdEnd) reduction = 1.0f;
+            else
+            {
+                const float r = juce::jlimit(0.0f, 1.0f, (t - holdEnd) / juce::jmax(0.0001f, 1.0f - holdEnd));
+                const float shaped = std::pow(r, curveShape);
+                reduction = 1.0f - shaped * shaped * (3.0f - 2.0f * shaped);
+            }
+        }
         // Independent live recommendation (no longer pegged to Max Reduction).
         const float bassRms = std::sqrt(juce::jmax(0.0f, bassLowEnergy));
         const float kickRms = std::sqrt(juce::jmax(0.0f, kickLowEnergy));
