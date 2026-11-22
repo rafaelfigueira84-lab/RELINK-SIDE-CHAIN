@@ -45,10 +45,6 @@ void RelinkSmartSidechainAudioProcessor::prepareToPlay(double sr, int)
     observedPulseSamples = 0;
     insidePulse = false;
     durationEstimateMs = 180;
-    lowEndEnvelope = lowEndPeak = 0.0f;
-    estimatedBeatMs = 485.0f;
-    measuringLowEnd = false;
-    lowEndSamples = 0;
     adaptiveDepthDb = 6.0f;
     bassLowEnergy = kickLowEnergy = kickHighEnergy = 0.0f;
     kickLowState = kickMidState = 0.0f;
@@ -85,8 +81,6 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
     const float low80Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 80.0f / float(fs));
     const float low220Weight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 220.0f / float(fs));
     const float bassAnalysisWeight = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 130.0f / float(fs));
-    const float lowAttack = std::exp(-1.0f / (float(fs) * 0.004f));
-    const float lowRelease = std::exp(-1.0f / (float(fs) * 0.016f));
     if (requestAnalysis.exchange(false))
     {
         analysisSamples = analysisSamplesWithKick = 0;
@@ -106,9 +100,6 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         // Slow amplitude/spectrum statistics; the bass is measured before gain reduction.
         const float kickSignal = hasSC && scBuffer.getNumChannels() > 0 ? scBuffer.getSample(0, i) : 0.0f;
         kickLowState += low80Weight * (kickSignal - kickLowState);
-        const float lowMagnitude = std::abs(kickLowState);
-        lowEndEnvelope = lowMagnitude + (lowEndEnvelope - lowMagnitude) *
-            (lowMagnitude > lowEndEnvelope ? lowAttack : lowRelease);
         kickMidState += low220Weight * (kickSignal - kickMidState);
         kickLowEnergy += rmsWeight * (kickLowState * kickLowState - kickLowEnergy);
         const float upperLow = kickMidState - kickLowState;
@@ -121,37 +112,17 @@ void RelinkSmartSidechainAudioProcessor::processBlock(juce::AudioBuffer<float>& 
         const int refractory = int(fs * 0.090);
         if (above && !insidePulse && samplesSinceTrigger > refractory)
         {
-            const float beat = samplesSinceTrigger * 1000.0f / float(fs);
-            if (beat >= 220.0f && beat <= 1100.0f)
-                estimatedBeatMs = 0.75f * estimatedBeatMs + 0.25f * beat;
             samplesSinceTrigger = 0;
             observedPulseSamples = 0;
             insidePulse = true;
-            lowEndPeak = juce::jmax(lowEndEnvelope, 0.00001f);
-            lowEndSamples = 0;
-            measuringLowEnd = true;
-        }
-        if (measuringLowEnd)
-        {
-            ++lowEndSamples;
-            lowEndPeak = juce::jmax(lowEndPeak, lowEndEnvelope);
-            const float elapsedMs = lowEndSamples * 1000.0f / float(fs);
-            // The relevant bass/kick overlap usually ends before the absolute
-            // silence threshold used by the original envelope detector.
-            if ((elapsedMs > 45.0f && lowEndEnvelope < lowEndPeak * 0.30f)
-                || elapsedMs > 450.0f)
-            {
-                const float rhythmicCeiling = juce::jlimit(100.0f, 320.0f, 0.44f * estimatedBeatMs);
-                const float observed = juce::jlimit(65.0f, rhythmicCeiling, elapsedMs * 0.85f + 12.0f);
-                durationEstimateMs = 0.70f * durationEstimateMs + 0.30f * observed;
-                measuringLowEnd = false;
-            }
         }
         if (insidePulse)
         {
             ++observedPulseSamples;
             if (!above || observedPulseSamples > int(fs * 0.45))
             {
+                const float observed = juce::jlimit(55.0f, 450.0f, observedPulseSamples * 1000.0f / float(fs));
+                durationEstimateMs = 0.80f * durationEstimateMs + 0.20f * (observed + 28.0f);
                 insidePulse = false;
             }
         }
